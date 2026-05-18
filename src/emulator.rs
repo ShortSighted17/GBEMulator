@@ -14,12 +14,32 @@ impl Emulator {
         Self { cpu: Cpu::new(mmu) }
     }
 
+    /// One CPU step + lockstep tick of every subsystem.
     pub fn step(&mut self) -> u32 {
         let cycles = self.cpu.step();
         self.cpu.bus.tick(cycles);
         cycles
     }
 
+    /// Run until the PPU signals a frame is ready (i.e. it just entered
+    /// VBlank). Clears the flag and returns the number of T-cycles spent.
+    /// Used by the windowed front-end.
+    pub fn run_frame(&mut self) -> u64 {
+        let mut total: u64 = 0;
+        // Safety net: a real DMG frame is 70224 T-cycles; cap well above
+        // that so a buggy ROM can't wedge us forever.
+        const SAFETY_LIMIT: u64 = 200_000;
+        while total < SAFETY_LIMIT {
+            total += self.step() as u64;
+            if self.cpu.bus.ppu.frame_ready {
+                self.cpu.bus.ppu.frame_ready = false;
+                return total;
+            }
+        }
+        total
+    }
+
+    /// Headless run used by Blargg-style serial test ROMs.
     pub fn run_blargg(&mut self, max_cycles: u64) -> u64 {
         let mut total: u64 = 0;
         while total < max_cycles {
