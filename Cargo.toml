@@ -1,0 +1,14 @@
+[package]
+name = "gb_emulator"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gb_emulator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gb_emulator"
+path = "src/main.rs"
+
+[dependencies]
