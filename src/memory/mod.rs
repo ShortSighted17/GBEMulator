@@ -6,6 +6,7 @@ use std::io::Write;
 use crate::timer::Timer;
 use crate::ppu::Ppu;
 use crate::joypad::Joypad;
+use cartridge::Cartridge;
 
 pub trait Bus {
     fn read(&self, addr: u16) -> u8;
@@ -23,12 +24,7 @@ pub trait Bus {
 }
 
 pub struct Mmu {
-    rom: Vec<u8>,
-    rom_bank: u8,
-    has_mbc1: bool,
-
-    eram: [u8; 0x2000],
-    eram_enabled: bool,
+    pub cart: Cartridge,
 
     wram: [u8; 0x2000],
     hram: [u8; 0x7F],
@@ -48,11 +44,7 @@ pub struct Mmu {
 impl Mmu {
     pub fn new() -> Self {
         Self {
-            rom: vec![0; 0x8000],
-            rom_bank: 1,
-            has_mbc1: false,
-            eram: [0; 0x2000],
-            eram_enabled: false,
+            cart: Cartridge::empty(),
             wram: [0; 0x2000],
             hram: [0; 0x7F],
             io: [0; 0x80],
@@ -66,10 +58,7 @@ impl Mmu {
     }
 
     pub fn load_rom(&mut self, rom: &[u8]) {
-        self.rom = rom.to_vec();
-        let mbc_type = self.rom.get(0x0147).copied().unwrap_or(0);
-        self.has_mbc1 = matches!(mbc_type, 0x01 | 0x02 | 0x03);
-        self.rom_bank = 1;
+        self.cart = Cartridge::from_rom(rom.to_vec());
     }
 
     pub fn tick(&mut self, cycles: u32) {
@@ -102,14 +91,6 @@ impl Mmu {
             let byte = self.read(base + i);
             self.ppu.write_oam(0xFE00 + i, byte);
         }
-    }
-
-    fn rom_bank0(&self, addr: u16) -> u8 {
-        *self.rom.get(addr as usize).unwrap_or(&0xFF)
-    }
-    fn rom_bankn(&self, addr: u16) -> u8 {
-        let off = (self.rom_bank as usize) * 0x4000 + (addr as usize - 0x4000);
-        *self.rom.get(off).unwrap_or(&0xFF)
     }
 
     fn io_read(&self, addr: u16) -> u8 {
@@ -148,10 +129,9 @@ impl Default for Mmu { fn default() -> Self { Self::new() } }
 impl Bus for Mmu {
     fn read(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x3FFF => self.rom_bank0(addr),
-            0x4000..=0x7FFF => self.rom_bankn(addr),
+            0x0000..=0x7FFF => self.cart.read_rom(addr),
             0x8000..=0x9FFF => self.ppu.read_vram(addr),
-            0xA000..=0xBFFF => if self.eram_enabled { self.eram[(addr - 0xA000) as usize] } else { 0xFF },
+            0xA000..=0xBFFF => self.cart.read_ram(addr),
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize],
             0xFE00..=0xFE9F => self.ppu.read_oam(addr),
@@ -164,16 +144,9 @@ impl Bus for Mmu {
 
     fn write(&mut self, addr: u16, value: u8) {
         match addr {
-            0x0000..=0x1FFF => if self.has_mbc1 { self.eram_enabled = (value & 0x0F) == 0x0A; },
-            0x2000..=0x3FFF => if self.has_mbc1 {
-                let mut bank = value & 0x1F;
-                if bank == 0 { bank = 1; }
-                self.rom_bank = (self.rom_bank & 0x60) | bank;
-            },
-            0x4000..=0x5FFF => {}
-            0x6000..=0x7FFF => {}
+            0x0000..=0x7FFF => self.cart.write_rom(addr, value),
             0x8000..=0x9FFF => self.ppu.write_vram(addr, value),
-            0xA000..=0xBFFF => if self.eram_enabled { self.eram[(addr - 0xA000) as usize] = value; },
+            0xA000..=0xBFFF => self.cart.write_ram(addr, value),
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = value,
             0xE000..=0xFDFF => self.wram[(addr - 0xE000) as usize] = value,
             0xFE00..=0xFE9F => self.ppu.write_oam(addr, value),
@@ -245,12 +218,9 @@ mod tests {
     #[test]
     fn joypad_routed_through_ff00() {
         let mut mmu = Mmu::new();
-        // Select d-pad.
         mmu.write(0xFF00, 0xEF);
-        // Reading FF00 with nothing pressed: top bits 1, select retained, low nibble 0xF.
         assert_eq!(mmu.read(0xFF00) & 0x0F, 0x0F);
 
-        // Press Right via the joypad directly, then read again.
         mmu.joypad.set_state(crate::joypad::bit(crate::joypad::Button::Right));
         assert_eq!(mmu.read(0xFF00) & 0x01, 0);
     }
