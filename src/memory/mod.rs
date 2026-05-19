@@ -6,6 +6,7 @@ use std::io::Write;
 use crate::timer::Timer;
 use crate::ppu::Ppu;
 use crate::joypad::Joypad;
+use crate::apu::Apu;
 use cartridge::Cartridge;
 
 pub trait Bus {
@@ -33,8 +34,9 @@ pub struct Mmu {
     pub ie: u8,
 
     pub timer: Timer,
-    pub ppu:   Ppu,
+    pub ppu:    Ppu,
     pub joypad: Joypad,
+    pub apu:    Apu,
 
     dma_source: u8,
 
@@ -49,9 +51,10 @@ impl Mmu {
             hram: [0; 0x7F],
             io: [0; 0x80],
             ie: 0,
-            timer: Timer::new(),
-            ppu:   Ppu::new(),
+            timer:  Timer::new(),
+            ppu:    Ppu::new(),
             joypad: Joypad::new(),
+            apu:    Apu::new(),
             dma_source: 0,
             serial_buffer: String::new(),
         }
@@ -82,6 +85,9 @@ impl Mmu {
             self.joypad.interrupt_request = false;
             self.io[0x0F] |= 0x10; // IF bit 4 (joypad)
         }
+
+        // APU has no interrupts; it just advances state.
+        self.apu.step(cycles);
     }
 
     fn oam_dma(&mut self, value: u8) {
@@ -97,6 +103,7 @@ impl Mmu {
         match addr {
             0xFF00 => self.joypad.read(),
             0xFF04..=0xFF07 => self.timer.read(addr),
+            0xFF10..=0xFF3F => self.apu.read_reg(addr),
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B => self.ppu.read_reg(addr),
             0xFF46 => self.dma_source,
             _ => self.io[(addr - 0xFF00) as usize],
@@ -107,6 +114,7 @@ impl Mmu {
         match addr {
             0xFF00 => self.joypad.write(value),
             0xFF04..=0xFF07 => self.timer.write(addr, value),
+            0xFF10..=0xFF3F => self.apu.write_reg(addr, value),
             0xFF40..=0xFF45 | 0xFF47..=0xFF4B => self.ppu.write_reg(addr, value),
             0xFF46 => self.oam_dma(value),
             0xFF02 => {
@@ -223,5 +231,18 @@ mod tests {
 
         mmu.joypad.set_state(crate::joypad::bit(crate::joypad::Button::Right));
         assert_eq!(mmu.read(0xFF00) & 0x01, 0);
+    }
+
+    #[test]
+    fn apu_routed_through_ff10_ff3f() {
+        let mut mmu = Mmu::new();
+        // APU is off out of reset → writes to 0xFF10..=0xFF25 are dropped
+        // except for NR52 itself. Power it on first.
+        mmu.write(0xFF26, 0x80);
+        mmu.write(0xFF24, 0x77);
+        assert_eq!(mmu.read(0xFF24), 0x77);
+        // Wave RAM round-trip via MMU.
+        mmu.write(0xFF35, 0xAB);
+        assert_eq!(mmu.read(0xFF35), 0xAB);
     }
 }

@@ -10,8 +10,8 @@ pub mod cpu;
 pub mod memory;
 pub mod emulator;
 
-// Subsystems below are stubs for now — we'll flesh them out in later phases.
 pub mod ppu;
 pub mod timer;
 pub mod joypad;
 pub mod apu;
+pub mod audio;
