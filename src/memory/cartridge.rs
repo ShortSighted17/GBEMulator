@@ -110,6 +110,29 @@ impl Cartridge {
         }
     }
 
+    // ── Battery-backed save persistence ─────────────────────────────────
+
+    /// Read-only access to external RAM. Used by the save-file writer.
+    /// Empty slice for cartridges with no RAM.
+    pub fn ram(&self) -> &[u8] {
+        &self.ram
+    }
+
+    /// Replace external RAM contents from a save file. Sizes must match
+    /// what the cartridge expects (from header byte 0x0149) — mismatched
+    /// sizes are rejected so a stale `.sav` from a different ROM can't
+    /// corrupt a fresh session.
+    pub fn load_ram(&mut self, data: &[u8]) -> Result<(), String> {
+        if data.len() != self.ram.len() {
+            return Err(format!(
+                "save file size mismatch: file is {} bytes, cartridge expects {}",
+                data.len(), self.ram.len()
+            ));
+        }
+        self.ram.copy_from_slice(data);
+        Ok(())
+    }
+
     // ── ROM area: 0x0000–0x7FFF ─────────────────────────────────────────
 
     pub fn read_rom(&self, addr: u16) -> u8 {

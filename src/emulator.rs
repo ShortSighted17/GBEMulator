@@ -1,5 +1,8 @@
 // src/emulator.rs
 
+use std::fs;
+use std::path::Path;
+
 use crate::cpu::Cpu;
 use crate::memory::Mmu;
 
@@ -26,8 +29,6 @@ impl Emulator {
     /// Used by the windowed front-end.
     pub fn run_frame(&mut self) -> u64 {
         let mut total: u64 = 0;
-        // Safety net: a real DMG frame is 70224 T-cycles; cap well above
-        // that so a buggy ROM can't wedge us forever.
         const SAFETY_LIMIT: u64 = 200_000;
         while total < SAFETY_LIMIT {
             total += self.step() as u64;
@@ -61,5 +62,43 @@ impl Emulator {
         println!("DE = 0x{:04X}", r.de());
         println!("HL = 0x{:04X}", r.hl());
         println!("SP = 0x{:04X}", r.sp);
+    }
+
+    // ── Battery-backed save persistence ─────────────────────────────────
+
+    /// True if the inserted cartridge declares itself battery-backed.
+    /// Used by the front-end to decide whether to bother touching `.sav`.
+    pub fn has_battery(&self) -> bool {
+        self.cpu.bus.cart.has_battery
+    }
+
+    /// Try to load `path` as a save file into the cartridge's external RAM.
+    /// Returns Ok(true) if loaded, Ok(false) if the file doesn't exist,
+    /// and Err if it exists but couldn't be used (wrong size, IO error).
+    /// A fresh game with no prior save is the Ok(false) case.
+    pub fn load_save<P: AsRef<Path>>(&mut self, path: P) -> Result<bool, String> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(false);
+        }
+        let data = fs::read(path).map_err(|e| format!("reading {:?}: {}", path, e))?;
+        self.cpu.bus.cart.load_ram(&data)?;
+        Ok(true)
+    }
+
+    /// Write cartridge external RAM out to `path`. Skips silently if the
+    /// cartridge has nothing to save (no battery, or empty RAM array).
+    pub fn save_to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        if !self.has_battery() {
+            return Ok(());
+        }
+        let ram = self.cpu.bus.cart.ram();
+        if ram.is_empty() {
+            // MBC3+TIMER+BAT (0x0F) has battery but no RAM — only RTC,
+            // which we don't persist yet. Nothing to write.
+            return Ok(());
+        }
+        let path = path.as_ref();
+        fs::write(path, ram).map_err(|e| format!("writing {:?}: {}", path, e))
     }
 }
