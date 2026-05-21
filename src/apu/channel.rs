@@ -7,6 +7,22 @@
 // nothing else — the duty bits and the raw NRxx byte stay at zero.
 // That's why each channel has both a `write_nrX1` (full, used when on)
 // and a `write_nrX1_length_only` (used when off).
+//
+// Extra-length-clocking quirk (DMG): when an NRx4 write enables the
+// length counter (sets bit 6), and the frame sequencer is currently in
+// the "first half" of a length period (i.e. the NEXT step it dispatches
+// will NOT clock length — steps 1/3/5/7), then length is clocked once
+// immediately by the write itself. If that extra clock takes length to
+// zero and the write isn't ALSO a trigger, the channel is disabled.
+//
+// A companion quirk: when an NRx4 trigger reloads length from 0 to
+// max (64/256), if length-enable is set AND we're in the first half,
+// length is clocked once more right after the reload.
+//
+// `in_first_half` is supplied by the caller (Apu::write_reg in mod.rs)
+// based on `frame_seq_step`, which stores the LAST DISPATCHED step.
+// Next step = (frame_seq_step + 1) & 7. Length is clocked on even
+// steps (0/2/4/6), so "first half" means frame_seq_step is even.
 
 /// The four duty patterns, indexed by NR11/NR21 bits 7-6.
 const DUTY_TABLE: [[u8; 8]; 4] = [
@@ -27,8 +43,25 @@ pub struct LengthCounter {
 }
 
 impl LengthCounter {
+    /// Standard length tick: decrement once if enabled and non-zero.
+    /// Returns true if the counter just reached zero (channel should disable).
     pub fn tick(&mut self) -> bool {
         if self.enabled && self.counter > 0 {
+            self.counter -= 1;
+            if self.counter == 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Forced tick used by the "extra length clock on NRx4 write" quirk.
+    /// Unlike `tick`, this is invoked even when `enabled` was false going
+    /// into the write — what matters is that the write set length-enable
+    /// to 1. The decrement still requires counter > 0.
+    /// Returns true if the counter just reached zero.
+    pub fn force_tick(&mut self) -> bool {
+        if self.counter > 0 {
             self.counter -= 1;
             if self.counter == 0 {
                 return true;
@@ -154,12 +187,35 @@ impl Ch1State {
         self.freq = (self.freq & 0x0700) | value as u16;
     }
 
-    pub fn write_nr14(&mut self, value: u8) {
+    /// `in_first_half` is true when the next frame-seq step will NOT
+    /// clock length (i.e. frame_seq_step is even, 0/2/4/6).
+    pub fn write_nr14(&mut self, value: u8, in_first_half: bool) {
+        let prev_len_enable = self.length.enabled;
         self.nr14 = value;
         self.freq = (self.freq & 0x00FF) | ((value as u16 & 0x07) << 8);
-        self.length.enabled = value & 0x40 != 0;
-        if value & 0x80 != 0 {
+        let new_len_enable = value & 0x40 != 0;
+        self.length.enabled = new_len_enable;
+        let trigger = value & 0x80 != 0;
+
+        // Extra length clock when length-enable rises (0→1) during
+        // first half of length period. Skipped if this write is also
+        // a trigger that would reload from 0 — we handle that below.
+        if !prev_len_enable && new_len_enable && in_first_half {
+            if self.length.force_tick() && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        if trigger {
+            let len_was_zero = self.length.counter == 0;
             self.trigger();
+            // Companion quirk: if trigger reloaded length from 0 to
+            // max AND length is enabled AND first half, clock once more.
+            if len_was_zero && self.length.enabled && in_first_half {
+                self.length.force_tick();
+                // If this brings length to 0 again it won't disable
+                // the channel; the trigger already set enabled = true.
+            }
         }
     }
 
@@ -202,8 +258,14 @@ impl Ch1State {
         if !self.sweep.enabled { return; }
         if self.sweep.timer > 0 { self.sweep.timer -= 1; }
         if self.sweep.timer == 0 {
-            self.sweep.timer = if self.sweep.period == 0 { 8 } else { self.sweep.period };
-            if self.sweep.period != 0 && self.sweep.shift != 0 {
+            // Re-read period from NR10 at each reload so mid-flight
+            // changes take effect. Period 0 is treated as 8 — that's
+            // what makes test 05-sweep-details #2 "Timer treats period
+            // 0 as 8" pass.
+            let nr10_period = (self.nr10 >> 4) & 0x07;
+            self.sweep.period = nr10_period;
+            self.sweep.timer = if nr10_period == 0 { 8 } else { nr10_period };
+            if nr10_period != 0 && self.sweep.shift != 0 {
                 let next = self.sweep.calculate();
                 if next > 2047 {
                     self.enabled = false;
@@ -266,12 +328,26 @@ impl Ch2State {
         self.freq = (self.freq & 0x0700) | value as u16;
     }
 
-    pub fn write_nr24(&mut self, value: u8) {
+    pub fn write_nr24(&mut self, value: u8, in_first_half: bool) {
+        let prev_len_enable = self.length.enabled;
         self.nr24 = value;
         self.freq = (self.freq & 0x00FF) | ((value as u16 & 0x07) << 8);
-        self.length.enabled = value & 0x40 != 0;
-        if value & 0x80 != 0 {
+        let new_len_enable = value & 0x40 != 0;
+        self.length.enabled = new_len_enable;
+        let trigger = value & 0x80 != 0;
+
+        if !prev_len_enable && new_len_enable && in_first_half {
+            if self.length.force_tick() && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        if trigger {
+            let len_was_zero = self.length.counter == 0;
             self.trigger();
+            if len_was_zero && self.length.enabled && in_first_half {
+                self.length.force_tick();
+            }
         }
     }
 
@@ -354,12 +430,26 @@ impl Ch3State {
         self.freq = (self.freq & 0x0700) | value as u16;
     }
 
-    pub fn write_nr34(&mut self, value: u8) {
+    pub fn write_nr34(&mut self, value: u8, in_first_half: bool) {
+        let prev_len_enable = self.length.enabled;
         self.nr34 = value;
         self.freq = (self.freq & 0x00FF) | ((value as u16 & 0x07) << 8);
-        self.length.enabled = value & 0x40 != 0;
-        if value & 0x80 != 0 {
+        let new_len_enable = value & 0x40 != 0;
+        self.length.enabled = new_len_enable;
+        let trigger = value & 0x80 != 0;
+
+        if !prev_len_enable && new_len_enable && in_first_half {
+            if self.length.force_tick() && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        if trigger {
+            let len_was_zero = self.length.counter == 0;
             self.trigger();
+            if len_was_zero && self.length.enabled && in_first_half {
+                self.length.force_tick();
+            }
         }
     }
 
@@ -444,11 +534,25 @@ impl Ch4State {
         self.width_mode = value & 0x08 != 0;
     }
 
-    pub fn write_nr44(&mut self, value: u8) {
+    pub fn write_nr44(&mut self, value: u8, in_first_half: bool) {
+        let prev_len_enable = self.length.enabled;
         self.nr44 = value;
-        self.length.enabled = value & 0x40 != 0;
-        if value & 0x80 != 0 {
+        let new_len_enable = value & 0x40 != 0;
+        self.length.enabled = new_len_enable;
+        let trigger = value & 0x80 != 0;
+
+        if !prev_len_enable && new_len_enable && in_first_half {
+            if self.length.force_tick() && !trigger {
+                self.enabled = false;
+            }
+        }
+
+        if trigger {
+            let len_was_zero = self.length.counter == 0;
             self.trigger();
+            if len_was_zero && self.length.enabled && in_first_half {
+                self.length.force_tick();
+            }
         }
     }
 

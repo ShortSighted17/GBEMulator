@@ -17,6 +17,13 @@
 //     sequencer DISPATCH (which clocks length/sweep/envelope) is
 //     suspended. This is what allows the frame-sequencer phase to
 //     be predictable after a power cycle.
+//
+// Extra length clocking (DMG): when an NRx4 write enables length
+// (bit 6 going 0→1) during the "first half" of a length period
+// (the next frame-seq step won't clock length), length is clocked
+// once immediately. See channel.rs for the per-channel handling.
+// We compute `in_first_half` here and thread it into the channel
+// write methods.
 
 pub mod channel;
 
@@ -87,6 +94,14 @@ impl Apu {
         self.sample_buffer.clear();
     }
 
+    /// True when the NEXT frame-seq step will NOT clock length.
+    /// Length is clocked at steps 0/2/4/6 (even). `frame_seq_step`
+    /// is the LAST DISPATCHED step, so next = (step + 1) & 7.
+    /// Next is odd ⇔ step is even ⇔ no length clock coming up.
+    fn in_first_half(&self) -> bool {
+        self.frame_seq_step % 2 == 0
+    }
+
     pub fn read_reg(&self, addr: u16) -> u8 {
         match addr {
             0xFF10 => self.ch1.nr10 | 0x80,
@@ -144,30 +159,34 @@ impl Apu {
             }
         }
 
+        // Cache once per write — passed to NRx4 writes for the
+        // extra-length-clock quirk.
+        let fh = self.in_first_half();
+
         match addr {
             0xFF10 => self.ch1.write_nr10(value),
             0xFF11 => self.ch1.write_nr11(value),
             0xFF12 => self.ch1.write_nr12(value),
             0xFF13 => self.ch1.write_nr13(value),
-            0xFF14 => self.ch1.write_nr14(value),
+            0xFF14 => self.ch1.write_nr14(value, fh),
 
             0xFF15 => {}
             0xFF16 => self.ch2.write_nr21(value),
             0xFF17 => self.ch2.write_nr22(value),
             0xFF18 => self.ch2.write_nr23(value),
-            0xFF19 => self.ch2.write_nr24(value),
+            0xFF19 => self.ch2.write_nr24(value, fh),
 
             0xFF1A => self.ch3.write_nr30(value),
             0xFF1B => self.ch3.write_nr31(value),
             0xFF1C => self.ch3.write_nr32(value),
             0xFF1D => self.ch3.write_nr33(value),
-            0xFF1E => self.ch3.write_nr34(value),
+            0xFF1E => self.ch3.write_nr34(value, fh),
 
             0xFF1F => {}
             0xFF20 => self.ch4.write_nr41(value),
             0xFF21 => self.ch4.write_nr42(value),
             0xFF22 => self.ch4.write_nr43(value),
-            0xFF23 => self.ch4.write_nr44(value),
+            0xFF23 => self.ch4.write_nr44(value, fh),
 
             0xFF24 => self.nr50 = value,
             0xFF25 => self.nr51 = value,

@@ -37,9 +37,18 @@ impl Registers {
         self.a = (v >> 8) as u8;
         self.f = (v as u8) & 0xF0;
     }
-    pub fn set_bc(&mut self, v: u16) { self.b = (v >> 8) as u8; self.c = v as u8; }
-    pub fn set_de(&mut self, v: u16) { self.d = (v >> 8) as u8; self.e = v as u8; }
-    pub fn set_hl(&mut self, v: u16) { self.h = (v >> 8) as u8; self.l = v as u8; }
+    pub fn set_bc(&mut self, v: u16) { 
+        self.b = (v >> 8) as u8;
+        self.c = v as u8; 
+    }
+    pub fn set_de(&mut self, v: u16) {
+        self.d = (v >> 8) as u8;
+        self.e = v as u8;
+    }
+    pub fn set_hl(&mut self, v: u16) {
+        self.h = (v >> 8) as u8;
+        self.l = v as u8;
+    }
 
     pub fn get_flag(&self, flag: Flag) -> bool {
         let mask = match flag {
