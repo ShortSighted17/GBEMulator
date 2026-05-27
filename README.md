@@ -5,7 +5,8 @@ A Gameboy emulator written in Rust as a learning project.
 ## Running
 
 you no longer need Rust toolchain, though i'd leave the instructions for the tech savvy. all you need is the executable, just drag a *.gb file onto it.
-You'll need a Rust toolchain ([rustup.rs](https://rustup.rs)) and a Game Boy ROM (`.gb` file).
+
+for the Rust toolchain: ([rustup.rs](https://rustup.rs)) and a Game Boy ROM (`.gb` file).
 There are some examples i tested with included in the roms directory.
 
 ```sh
